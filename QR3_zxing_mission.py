@@ -14,7 +14,7 @@ SERVO_PWM_STOP = 1500
 LATITUDE = 10.0524451
 LONGITUDE = 76.620354
 VIDEO_SOURCE = 'rtsp://192.168.144.25:8554/main.264'
-
+ 
 # Connect to Drone
 def connect_to_drone():
     print(f'Connecting to drone on {COM_PORT}...')
@@ -27,6 +27,44 @@ def connect_to_drone():
         print(f'❌ Connection failed: {e}')
         return None
 
+def clear_mission(master):
+    print('🗑️ Clearing previous mission...')
+    master.waypoint_clear_all_send()
+    time.sleep(1)
+
+# Create mission waypoints
+def create_mission():
+    return [
+        (0, 2, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 5),  # Takeoff to 10m
+        (1, 2, mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 0, 0, 0, 0, 10.052, 76.621, 5),  # Waypoint 1
+        (2, 2, mavutil.mavlink.MAV_CMD_NAV_LAND, 0, 0, 0, 0, 10.053, 76.622, 0),  # Waypoint 2
+        # (3, 3, mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0, 0, 0, 0, 0),  # RTL
+    ]
+# Upload mission to FC
+def upload_mission(master, mission):
+    print('📤 Uploading new mission...')
+    master.waypoint_count_send(len(mission))
+    for i, wp in enumerate(mission):
+        seq, frame, command, p1, p2, p3, lat, lon, alt = wp
+        master.mav.mission_item_int_send(
+            master.target_system, master.target_component, seq, frame, command, 0, 1, 
+            p1, p2, p3, int(lat * 1e7), int(lon * 1e7), alt
+        )
+        msg = master.recv_match(type='MISSION_REQUEST', blocking=True)
+        print(f'✅ Waypoint {seq} sent!')
+
+    print('✅ Mission upload complete!')
+    
+# Set mode to AUTO and start mission
+def start_mission(master):
+    print('🚀 Switching to AUTO mode and starting mission...')
+    master.set_mode('AUTO')
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_MISSION_START,
+        0, 0, 0, 0, 0, 0, 0, 0
+    )
+    print('✅ Mission started!')
 # Control Servo
 def set_servo(master, channel, pwm_value):
     print(f'🔧 Moving servo on channel {channel} to {pwm_value} PWM')
@@ -49,22 +87,22 @@ def set_guided_mode(master):
     print('✅ Mode set to GUIDED.')
 
 # Arm and Takeoff
-def arm_and_takeoff(master, altitude=5):
-    print('🕹️ Arming drone...')
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0, 1, 0, 0, 0, 0, 0, 0
-    )
-    print('✅ Drone armed.')
-    time.sleep(4)
-    print(f'🚀 Taking off to {altitude} meters...')
-    master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-        0, 0, 0, 0, 0, 0, altitude, 0
-    )
-    time.sleep(10)
+# def arm_and_takeoff(master, altitude=5):
+#     print('🕹️ Arming drone...')
+#     master.mav.command_long_send(
+#         master.target_system, master.target_component,
+#         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+#         0, 1, 0, 0, 0, 0, 0, 0
+#     )
+#     print('✅ Drone armed.')
+#     time.sleep(4)
+#     print(f'🚀 Taking off to {altitude} meters...')
+#     master.mav.command_long_send(
+#         master.target_system, master.target_component,
+#         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+#         0, 0, 0, 0, 0, 0, altitude, 0
+#     )
+#     time.sleep(10)
 
 # Return to Launch
 def return_to_launch(master):
@@ -128,7 +166,30 @@ def get_home_location(master):
             lon = msg.longitude / 1e7
             print(f'🏠 Home Location: Latitude={lat}, Longitude={lon}')
             return lat, lon
-        
+def arm_drone(master):
+    print('🕹️ Arming drone...')
+    
+    # Send arm command
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0, 1, 0, 0, 0, 0, 0, 0
+    )
+    print('✅ Arm command sent. Waiting for confirmation...')
+    #time.sleep(2)
+
+    # Confirm drone is armed
+    while True:
+        master.mav.request_data_stream_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 1, 1
+        )
+        msg = master.recv_match(type='HEARTBEAT', blocking=True)
+        if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+            print('✅ Drone confirmed as armed.')
+            break
+        print('⏳ Waiting for drone to arm...')
+        #time.sleep(1)        
 def navigate_to_location(master, lat, lon, altitude=10):
     """Navigate the drone to a specified GPS location."""
     print(f'✈️ Navigating to GPS coordinates: {lat}, {lon}')
@@ -142,10 +203,11 @@ def return_to_home(master, home_lat, home_lon):
     print('🚀 Returning to home location at 5m altitude...')
     navigate_to_location(master, home_lat, home_lon, altitude=5)
     print('✅ Waypoint navigation to home initiated at 5m altitude.')
-        
+
+
 # Main Function
 def main():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
     if not cap.isOpened():
         print('❌ Error: Unable to open video stream.')
         return
@@ -154,10 +216,10 @@ def main():
     drone = connect_to_drone()
     if not drone:
         return
-    set_guided_mode(drone)
-    arm_and_takeoff(drone, altitude=4)
-    print('⏳ Waiting for 5 seconds after landing...')
-    time.sleep(5)
+    # set_guided_mode(drone)
+    # arm_and_takeoff(drone, altitude=4)
+    # print('⏳ Waiting for 5 seconds after landing...')
+    # time.sleep(5)
 
 
     while True:
@@ -182,9 +244,9 @@ def main():
                 home_lat, home_lon = get_home_location(drone)
                 print("home location and lattitude")
                 print(home_lat,home_lon)
-                arm_and_takeoff(drone, altitude=4)
-                print('⏳ Waiting for 5 seconds after landing...')
-                time.sleep(5)
+                # arm_and_takeoff(drone, altitude=4)
+                # print('⏳ Waiting for 5 seconds after landing...')
+                # time.sleep(5)
 
                 land_at_coordinates(drone)
                 print('⏳ Waiting for 5 seconds after landing...')
@@ -196,16 +258,22 @@ def main():
                 set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
                 #time.sleep(5)
                 
-                
+                clear_mission(drone)
+                mission = create_mission()
+                upload_mission(drone, mission)
                 set_guided_mode(drone)
-                time.sleep(3)
-                arm_and_takeoff(drone, altitude=4)
-                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_CLOSE)
-                time.sleep(1)
-                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
-                #time.sleep(5)
-                #set_waypoint(drone, 10.04902393, 7.3432342, 3)
-                return_to_home(drone, home_lat, home_lon)
+                arm_drone(drone)
+                time.sleep(2)
+                start_mission(drone)
+                
+                # time.sleep(3)
+                # arm_and_takeoff(drone, altitude=4)
+                # set_servo(drone, SERVO_CHANNEL, SERVO_PWM_CLOSE)
+                # time.sleep(1)
+                # set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
+                # #time.sleep(5)
+                # #set_waypoint(drone, 10.04902393, 7.3432342, 3)
+                # return_to_home(drone, home_lat, home_lon)
                 break
 
         cv2.imshow('QR Code Detection', frame)
