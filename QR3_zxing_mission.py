@@ -204,6 +204,18 @@ def return_to_home(master, home_lat, home_lon):
     navigate_to_location(master, home_lat, home_lon, altitude=5)
     print('✅ Waypoint navigation to home initiated at 5m altitude.')
 
+# Monitor Altitude and Close Servo
+def monitor_altitude_and_close_servo(master):
+    while True:
+        msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
+        if msg:
+            altitude = msg.relative_alt / 1000.0  # Convert mm to meters
+            print(f'📏 Current Altitude: {altitude}m')
+            if altitude <= 1.0:
+                print('🔧 Closing servo as altitude is 1m')
+                set_servo(master, SERVO_CHANNEL, SERVO_PWM_CLOSE)
+                break
+        time.sleep(0.5)
 
 # Main Function
 def main():
@@ -257,7 +269,10 @@ def main():
                 time.sleep(0.8)
                 set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
                 #time.sleep(5)
-                
+                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_CLOSE)
+                time.sleep(0.5)
+                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
+                time.sleep(5)
                 clear_mission(drone)
                 mission = create_mission()
                 upload_mission(drone, mission)
@@ -265,13 +280,10 @@ def main():
                 arm_drone(drone)
                 time.sleep(2)
                 start_mission(drone)
+                monitor_altitude_and_close_servo(drone)
                 
                 # time.sleep(3)
                 # arm_and_takeoff(drone, altitude=4)
-                # set_servo(drone, SERVO_CHANNEL, SERVO_PWM_CLOSE)
-                # time.sleep(1)
-                # set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
-                # #time.sleep(5)
                 # #set_waypoint(drone, 10.04902393, 7.3432342, 3)
                 # return_to_home(drone, home_lat, home_lon)
                 break
