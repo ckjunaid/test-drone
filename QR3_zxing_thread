@@ -1,0 +1,158 @@
+import cv2
+import threading
+import numpy as np
+from pymavlink import mavutil
+import time
+
+# Configuration Variables
+COM_PORT = 'COM8'
+BAUD_RATE = 57600
+SERVO_CHANNEL = 9
+SERVO_PWM_FORWARD = 2000
+SERVO_PWM_CLOSE = 1100
+SERVO_PWM_STOP = 1500
+LATITUDE = 10.0524451
+LONGITUDE = 76.620354
+VIDEO_SOURCE = 'rtsp://192.168.144.25:8554/main.264'
+
+# Global variables for video frame handling
+latest_frame = None
+frame_lock = threading.Lock()
+
+def video_capture_thread(source=VIDEO_SOURCE):
+    """Captures video frames in a separate thread."""
+    global latest_frame
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        print('❌ Error: Unable to open video stream.')
+        return
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        
+        with frame_lock:
+            latest_frame = frame  # Update the latest frame
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+
+# Connect to Drone
+def connect_to_drone():
+    print(f'Connecting to drone on {COM_PORT}...')
+    try:
+        master = mavutil.mavlink_connection(COM_PORT, baud=BAUD_RATE)
+        master.wait_heartbeat()
+        print(f'✅ Drone connected. Heartbeat from system {master.target_system}, component {master.target_component}')
+        return master
+    except Exception as e:
+        print(f'❌ Connection failed: {e}')
+        return None
+
+# Control Servo
+def set_servo(master, channel, pwm_value):
+    print(f'🔧 Moving servo on channel {channel} to {pwm_value} PWM')
+    master.mav.command_long_send(
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+        0, channel, pwm_value, 0, 0, 0, 0, 0
+    )
+    print('✅ Servo moved.')
+
+# Drone Mode Control
+def set_guided_mode(master):
+    print('🛫 Switching to GUIDED mode...')
+    master.mav.set_mode_send(
+        master.target_system,
+        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+        4  # 4 represents GUIDED mode
+    )
+    print('✅ Mode set to GUIDED.')
+
+# Arm and Takeoff
+def arm_and_takeoff(master, altitude=5):
+    print('🕹️ Arming drone...')
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0, 1, 0, 0, 0, 0, 0, 0
+    )
+    time.sleep(4)
+    print(f'🚀 Taking off to {altitude} meters...')
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+        0, 0, 0, 0, 0, 0, altitude, 0
+    )
+    time.sleep(10)
+
+# Return to Home
+def return_to_home(master, home_lat, home_lon):
+    print('🚀 Returning to home location at 5m altitude...')
+    master.mav.send(mavutil.mavlink.MAVLink_set_position_target_global_int_message(
+        0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+        int(0b110111111000), int(home_lat * 1e7), int(home_lon * 1e7), 5, 0, 0, 0, 0, 0, 0, 0, 0
+    ))
+    print('✅ Waypoint navigation to home initiated at 5m altitude.')
+
+# Main Function
+def main():
+    global latest_frame
+    
+    # Start video capture thread
+    video_thread = threading.Thread(target=video_capture_thread, args=(VIDEO_SOURCE,), daemon=True)
+    video_thread.start()
+    
+    qr_detector = cv2.QRCodeDetector()
+    drone = connect_to_drone()
+    if not drone:
+        return
+    
+    # set_guided_mode(drone)
+    # arm_and_takeoff(drone, altitude=4)
+    # time.sleep(5)
+    
+    while True:
+        with frame_lock:
+            if latest_frame is None:
+                continue
+            frame = latest_frame.copy()
+
+        data, bbox, _ = qr_detector.detectAndDecode(frame)
+        if bbox is not None and len(bbox) > 0:
+            for i in range(len(bbox)):
+                pt1 = tuple(bbox[i][0])
+                pt2 = tuple(bbox[(i + 1) % len(bbox)][0])
+                cv2.line(frame, pt1, pt2, (0, 255, 0), 2)
+
+            if data:
+                print(f'✅ QR Code detected: {data}')
+                home_lat, home_lon = LATITUDE, LONGITUDE
+                arm_and_takeoff(drone, altitude=4)
+                time.sleep(5)
+                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_FORWARD)
+                time.sleep(0.8)
+                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
+                time.sleep(3)
+                arm_and_takeoff(drone, altitude=4)
+                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_CLOSE)
+                time.sleep(1)
+                set_servo(drone, SERVO_CHANNEL, SERVO_PWM_STOP)
+                return_to_home(drone, home_lat, home_lon)
+                break
+        
+        cv2.imshow('QR Code Detection', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cv2.destroyAllWindows()
+    if drone:
+        drone.close()
+        print('🔌 Drone connection closed.')
+
+if __name__ == '__main__':
+    main()
